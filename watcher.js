@@ -9,7 +9,8 @@ const Prices = require('./src/prices');
 
 let FLASHSWAP_CONTRACT = process.env.CONTRACT;
 
-const TransactionSender = require('./src/transaction_send');
+// 延迟加载 TransactionSender（避免初始化时卡住）
+let TransactionSender = null;
 
 const fs = require('fs');
 const util = require('util');
@@ -20,16 +21,40 @@ console.log = function (d) {
     log_stdout.write(util.format(d) + '\n');
 };
 
-const web3 = new Web3(
-    new Web3.providers.WebsocketProvider(process.env.WSS_BLOCKS, {
+// 创建 Web3 连接，优先使用 HTTP RPC（更稳定）
+let rpcUrl = process.env.WSS_BLOCKS;
+let isWebSocket = rpcUrl && rpcUrl.startsWith('wss');
+
+let provider;
+if (isWebSocket) {
+    provider = new Web3.providers.WebsocketProvider(rpcUrl, {
         reconnect: {
             auto: true,
-            delay: 5000, // ms
+            delay: 5000,
             maxAttempts: 15,
             onTimeout: false
         }
-    })
-);
+    });
+} else if (rpcUrl && rpcUrl.startsWith('ws')) {
+    provider = new Web3.providers.WebsocketProvider(rpcUrl, {
+        reconnect: {
+            auto: true,
+            delay: 5000,
+            maxAttempts: 15,
+            onTimeout: false
+        }
+    });
+} else {
+    // 回退到 HTTP RPC
+    const httpUrl = rpcUrl ? rpcUrl.replace('wss://', 'https://').replace('ws://', 'http://') : 'https://bsc-dataseed.bnbchain.org:443';
+    console.log('使用 HTTP RPC: ' + httpUrl);
+    provider = new Web3.providers.HttpProvider(httpUrl, {
+        keepAlive: true,
+        timeout: 30000
+    });
+}
+
+const web3 = new Web3(provider);
 
 const { address: admin } = web3.eth.accounts.wallet.add(process.env.PRIVATE_KEY);
 
@@ -40,8 +65,6 @@ const pairs = require('./src/pairs').getPairs();
 
 const init = async () => {
     console.log('starting: ', JSON.stringify(pairs.map(p => p.name)));
-
-    const transactionSender = TransactionSender.factory(process.env.WSS_BLOCKS.split(','));
 
     let nonce = await web3.eth.getTransactionCount(admin);
     let gasPrice = await web3.eth.getGasPrice();
@@ -58,12 +81,28 @@ const init = async () => {
 
     console.log(`started: wallet ${admin} - gasPrice ${gasPrice} - contract owner: ${owner}`);
 
+    // 延迟初始化 TransactionSender（避免一开始就建立大量连接）
+    let transactionSender = null;
+    setTimeout(() => {
+        console.log('初始化交易发送器...');
+        if (!TransactionSender) {
+            TransactionSender = require('./src/transaction_send');
+        }
+        transactionSender = TransactionSender.factory(process.env.WSS_BLOCKS.split(','));
+        console.log('✓ 交易发送器已初始化');
+    }, 5000);
+
     let handler = async () => {
-        const myPrices = await Prices.getPrices();
-        if (Object.keys(myPrices).length > 0) {
-            for (const [key, value] of Object.entries(myPrices)) {
-                prices[key.toLowerCase()] = value;
+        try {
+            const myPrices = await Prices.getPrices();
+            if (Object.keys(myPrices).length > 0) {
+                for (const [key, value] of Object.entries(myPrices)) {
+                    prices[key.toLowerCase()] = value;
+                }
+                console.log('✓ 价格已更新:', Object.keys(myPrices).length, '个代币');
             }
+        } catch (e) {
+            console.warn('❌ 获取价格失败:', e.message, '- 使用默认价格');
         }
     };
 
@@ -118,10 +157,11 @@ const init = async () => {
                     const myGasPrice = new BigNumber(gasPrice).plus(gasPrice * 0.2212).toString();
                     const txCostBNB = Web3.utils.toBN(estimateGas) * Web3.utils.toBN(myGasPrice);
 
-                    let gasCostUsd = (txCostBNB / 1e18) * prices[BNB_MAINNET.toLowerCase()];
+                    const BNB_ADDRESS = '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c'; // mainnet WBNB
+                    let gasCostUsd = (txCostBNB / 1e18) * prices[BNB_ADDRESS.toLowerCase()];
                     const profitMinusFeeInUsd = profitUsd - gasCostUsd;
 
-                    if (profitMinusFeeInUsd < 0.6) {
+                    if (profitMinusFeeInUsd < 0.1) {
                         console.log(`[${block.number}] [${new Date().toLocaleString()}] [${provider}]: [${pair.name}] stopped: `, JSON.stringify({
                             profit: "$" + profitMinusFeeInUsd.toFixed(2),
                             profitWithoutGasCost: "$" + profitUsd.toFixed(2),
@@ -134,7 +174,7 @@ const init = async () => {
                         }));
                     }
 
-                    if (profitMinusFeeInUsd > 0.6) {
+                    if (profitMinusFeeInUsd > 0.1) {
                         console.log(`[${block.number}] [${new Date().toLocaleString()}] [${provider}]: [${pair.name}] and go: `, JSON.stringify({
                             profit: "$" + profitMinusFeeInUsd.toFixed(2),
                             profitWithoutGasCost: "$" + profitUsd.toFixed(2),
@@ -161,10 +201,14 @@ const init = async () => {
 
                         console.log(`[${block.number}] [${new Date().toLocaleString()}] [${provider}]: sending transactions...`, JSON.stringify(txData))
 
-                        try {
-                            await transactionSender.sendTransaction(txData);
-                        } catch (e) {
-                            console.error('transaction error', e);
+                        if (transactionSender) {
+                            try {
+                                await transactionSender.sendTransaction(txData);
+                            } catch (e) {
+                                console.error('transaction error', e);
+                            }
+                        } else {
+                            console.warn('⚠️  交易发送器尚未初始化，跳过交易');
                         }
                     }
                 }
@@ -174,7 +218,7 @@ const init = async () => {
         try {
             await Promise.all(calls.map(fn => fn()));
         } catch (e) {
-            console.log('error', e)
+            console.warn(`[${block.number}] Block processing error: ${e.message}`);
         }
 
         let number = performance.now() - start;

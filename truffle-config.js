@@ -71,27 +71,38 @@ module.exports = {
 
     mainnet: {
       provider: () => new HDWalletProvider(
-        'YOUR KEY',
-          'http://127.0.0.1:8545/'
+        process.env.PRIVATE_KEY,
+        'https://bsc-dataseed.bnbchain.org:443'
       ),
-      network_id: 56
+      network_id: 56,
+      gas: 5500000,
+      gasPrice: 50000000,
+      confirmations: 5,
+      timeoutBlocks: 200,
+      skipDryRun: false
     },
 
     forknet: {
       provider: () => new HDWalletProvider(
-          'YOUR KEY',
+          process.env.PRIVATE_KEY,
           'http://127.0.0.1:8545/'
       ),
-      network_id: 56
+      network_id: 56,
+      gas: 5500000,
+      gasPrice: 5000000000
     },
 
     testnet: {
       provider: () => new HDWalletProvider(
-          'YOUR KEY',
-          'https://data-seed-prebsc-2-s1.binance.org:8545/'
-
+          process.env.PRIVATE_KEY,
+          'https://bsc-testnet-dataseed.bnbchain.org'
       ),
-      network_id: 97
+      network_id: 97,
+      gas: 5500000,
+      gasPrice: 10000000000,
+      confirmations: 2,
+      timeoutBlocks: 200,
+      skipDryRun: true
     },
 
     // Useful for private networks
